@@ -1,0 +1,11 @@
+name: "multi-turn tool calls"
+task: "First list files in the current directory, then read any file you find. Call finish with a summary."
+assertions:
+  - type: tool_call_count
+    params:
+      tool: list_files
+      min: 1
+  - type: tool_call_count
+    params:
+      tool: finish
+      min: 1

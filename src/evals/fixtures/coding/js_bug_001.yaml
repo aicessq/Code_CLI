@@ -1,0 +1,20 @@
+name: "fix array sum function"
+fixtures:
+  src/sum.js: |
+    function sumArray(arr) {
+      let total = 0;
+      for (let i = 0; i <= arr.length; i++) {
+        total += arr[i];
+      }
+    }
+    module.exports = { sumArray };
+task: "There is a bug in src/sum.js: sumArray([1,2,3]) should return 6 but it returns undefined. Fix both bugs (loop condition and missing return)."
+assertions:
+  - type: file_contains
+    params:
+      file: src/sum.js
+      pattern: "return total|return.*total"
+  - type: file_contains
+    params:
+      file: src/sum.js
+      pattern: "i < arr\\.length"

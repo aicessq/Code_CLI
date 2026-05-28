@@ -1,0 +1,16 @@
+name: "fix off-by-one error"
+fixtures:
+  src/counter.py: |
+    def count_up_to(n):
+        result = []
+        i = 0
+        while i < n:
+            result.append(i)
+            i += 1
+        return result
+task: "There is a bug in src/counter.py: count_up_to(5) should return [0,1,2,3,4,5] but it returns [0,1,2,3,4]. Fix the bug."
+assertions:
+  - type: file_contains
+    params:
+      file: src/counter.py
+      pattern: "i <= n|range\\(n.*\\+.*1\\)"

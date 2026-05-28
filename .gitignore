@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.js.map
+*.d.ts
+*.d.ts.map
+.env
+.env.local
+runs/
+evals/responses/
+*.log
+.DS_Store
+Thumbs.db
+config.json

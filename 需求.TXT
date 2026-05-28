@@ -1,0 +1,846 @@
+> **先验证 MiMo 的 API / tool-call / thinking 协议细节；实现时把核心 agent runtime 做成模型无关；再通过 `ModelProfile + Adapter + PromptProfile + Eval Harness` 对 MiMo 做一等优化。**
+
+---
+
+# 1. 先要调研 / 验证哪些具体细节
+
+## A. API 兼容细节
+
+先验证 MiMo 是否能完全按 OpenAI-compatible Chat Completions 调用。
+
+重点看：
+
+```text
+1. endpoint
+2. authentication header
+3. request body 是否兼容 OpenAI chat/completions
+4. response 里 tool_calls 格式
+5. streaming chunk 格式
+6. error code 格式
+7. max_tokens / max_completion_tokens 参数差异
+8. temperature / top_p 默认值
+```
+
+MiMo 官方 OpenAI API 文档给的 endpoint 是：
+
+```text
+https://api.xiaomimimo.com/v1/chat/completions
+```
+
+并且支持 `api-key: $MIMO_API_KEY` 或 `Authorization: Bearer $MIMO_API_KEY` 两种认证方式。([Xiaomi MiMo][1])
+
+所以第一层抽象可以直接叫：
+
+```python
+OpenAICompatibleClient
+```
+
+但不要直接把 OpenAI SDK 原始 response 丢进 agent，需要自己做一层 normalization。
+
+---
+
+## B. thinking mode / reasoning_content 细节
+
+这是 MiMo 最需要专门处理的点。
+
+MiMo 官方文档明确有 “Passing Back reasoning_content in Multi-Turn Conversations for Agent Products” 说明；OpenAI-compatible API 文档也提示，在 thinking mode 的多轮工具调用过程中，模型会在 `tool_calls` 旁边返回 `reasoning_content`，后续继续对话时需要传回。([Xiaomi MiMo][1])
+
+你需要验证：
+
+```text
+1. 哪些 MiMo 模型会返回 reasoning_content
+2. thinking mode 是否默认开启
+3. assistant message 里 reasoning_content 的字段位置
+4. tool_calls + reasoning_content 是否同时存在
+5. 下一轮请求时是否必须完整回传 reasoning_content
+6. 裁剪历史消息时 reasoning_content 能不能裁
+7. streaming 模式下 reasoning_content 怎么拼接
+8. 丢失 reasoning_content 时 API 会不会 400
+```
+
+这会直接决定你的 `TranscriptStore` 设计。
+
+你的消息结构不能只是：
+
+```python
+{"role": "assistant", "content": "...", "tool_calls": [...]}
+```
+
+而应该是：
+
+```python
+@dataclass
+class AssistantMessage:
+    content: str | None
+    tool_calls: list[ToolCall]
+    reasoning_content: str | None
+    raw: dict
+```
+
+关键原则：
+
+> **内部保存 raw assistant message；发送下一轮请求时按对应模型 profile 重新序列化。**
+
+---
+
+## C. tool calling 稳定性细节
+
+你需要专门测 MiMo 对工具调用的稳定性，而不是假设它和 GPT / Claude 一样。
+
+要测这些：
+
+```text
+1. 单工具调用是否稳定
+2. 连续多轮工具调用是否稳定
+3. 工具参数 JSON 是否严格合法
+4. required fields 是否容易漏
+5. nested object 是否容易出错
+6. enum 是否稳定
+7. 多工具并行是否支持
+8. 工具失败后能否自我修正
+9. 长 observation 是否影响下一步决策
+10. 模型是否会编造工具结果
+```
+
+MVP 工具 schema 建议先保守：
+
+```text
+list_files(path)
+read_file(path, start_line, end_line)
+grep(pattern, path)
+bash(cmd, timeout_sec)
+apply_patch(patch)
+git_status()
+git_diff()
+finish(summary)
+```
+
+不要一上来做复杂嵌套参数。
+
+---
+
+## D. 模型能力差异细节
+
+MiMo-V2-Pro 和 MiMo-V2-Flash 的定位不同，所以要调研它们适合放在哪些环节。
+
+MiMo-V2-Pro 官方定位是面向 real-world agentic workloads，强调复杂 workflow、生产工程任务、工具调用、多步推理，并支持最高 1M-token context。([MiMo][2])
+
+MiMo-V2-Flash 是 309B total / 15B active 的 MoE，官方仓库描述它面向 high-speed reasoning 和 agentic workflows，支持 256k context，并通过 hybrid attention / MTP 降低推理成本。([GitHub][3])
+
+所以可以预设：
+
+```text
+MiMo-V2-Pro:
+  - planning
+  - complex implementation
+  - final review
+  - security audit
+  - hard coding tasks
+
+MiMo-V2-Flash:
+  - log summarization
+  - grep result summary
+  - simple test analysis
+  - context compression
+  - cheap subagent
+```
+
+但这只是初始假设，最终要用 harness 测。
+
+---
+
+# 2. 怎么实现：核心结构
+
+推荐结构是：
+
+```text
+mimo_code_agent/
+  llm/
+    base.py
+    openai_compatible.py
+    message.py
+    model_profile.py
+    transcript.py
+
+  profiles/
+    openai.py
+    deepseek.py
+    qwen.py
+    claude_proxy.py
+    mimo_v2_pro.py
+    mimo_v2_flash.py
+    mimo_v25_pro.py
+
+  agent/
+    loop.py
+    state.py
+    prompt.py
+    tool_call_repair.py
+
+  tools/
+    base.py
+    registry.py
+    list_files.py
+    read_file.py
+    grep.py
+    bash.py
+    apply_patch.py
+    git.py
+    finish.py
+
+  sandbox/
+    base.py
+    docker.py
+    local.py
+    policy.py
+
+  context/
+    packer.py
+    observation_compressor.py
+    repo_map.py
+
+  evals/
+    probe_api.py
+    tool_call_eval.py
+    coding_eval.py
+
+  logs/
+    trajectory.py
+```
+
+核心设计原则：
+
+```text
+agent loop 不知道自己在用 MiMo
+tool registry 不知道自己在用 MiMo
+sandbox 不知道自己在用 MiMo
+context packer 不知道自己在用 MiMo
+
+只有 LLM adapter / ModelProfile / PromptProfile 知道 MiMo 特性
+```
+
+---
+
+# 3. 关键抽象一：ModelProfile
+
+这是兼容大部分模型，同时优化 MiMo 的核心。
+
+```python
+@dataclass
+class ModelProfile:
+    name: str
+    provider: str
+
+    context_window: int
+    max_output_tokens: int
+
+    supports_tool_calls: bool
+    supports_parallel_tool_calls: bool
+    supports_streaming: bool
+    supports_thinking: bool
+
+    requires_reasoning_content_replay: bool
+    reasoning_content_field: str | None
+
+    default_temperature: float
+    default_top_p: float
+
+    preferred_tool_schema_style: str
+    max_observation_tokens: int
+
+    prompt_profile: str
+```
+
+普通 OpenAI-compatible 模型：
+
+```python
+OPENAI_COMPAT_DEFAULT = ModelProfile(
+    name="openai-compatible-default",
+    provider="openai-compatible",
+    context_window=128_000,
+    max_output_tokens=8192,
+    supports_tool_calls=True,
+    supports_parallel_tool_calls=False,
+    supports_streaming=True,
+    supports_thinking=False,
+    requires_reasoning_content_replay=False,
+    reasoning_content_field=None,
+    default_temperature=0.2,
+    default_top_p=1.0,
+    preferred_tool_schema_style="standard_json_schema",
+    max_observation_tokens=6000,
+    prompt_profile="generic_coding_agent",
+)
+```
+
+MiMo profile：
+
+```python
+MIMO_V2_PRO = ModelProfile(
+    name="mimo-v2-pro",
+    provider="mimo",
+    context_window=1_000_000,
+    max_output_tokens=16384,
+    supports_tool_calls=True,
+    supports_parallel_tool_calls=False,
+    supports_streaming=True,
+    supports_thinking=True,
+    requires_reasoning_content_replay=True,
+    reasoning_content_field="reasoning_content",
+    default_temperature=1.0,
+    default_top_p=0.95,
+    preferred_tool_schema_style="flat_json_schema",
+    max_observation_tokens=8000,
+    prompt_profile="mimo_coding_agent",
+)
+```
+
+MiMo Flash：
+
+```python
+MIMO_V2_FLASH = ModelProfile(
+    name="mimo-v2-flash",
+    provider="mimo",
+    context_window=256_000,
+    max_output_tokens=8192,
+    supports_tool_calls=True,
+    supports_parallel_tool_calls=False,
+    supports_streaming=True,
+    supports_thinking=True,
+    requires_reasoning_content_replay=True,
+    reasoning_content_field="reasoning_content",
+    default_temperature=0.3,
+    default_top_p=0.95,
+    preferred_tool_schema_style="flat_json_schema",
+    max_observation_tokens=4000,
+    prompt_profile="mimo_fast_agent",
+)
+```
+
+这样你不是写：
+
+```python
+if model.startswith("mimo"):
+    ...
+```
+
+而是写：
+
+```python
+if profile.requires_reasoning_content_replay:
+    preserve_reasoning_content(...)
+```
+
+这就优雅很多。
+
+---
+
+# 4. 关键抽象二：LLMClient
+
+统一接口：
+
+```python
+class LLMClient:
+    def chat(
+        self,
+        messages: list[AgentMessage],
+        tools: list[ToolSchema] | None,
+        profile: ModelProfile,
+        stream: bool = False,
+    ) -> ChatResult:
+        ...
+```
+
+`ChatResult` 不要直接暴露 OpenAI 原始 response，而是转成内部结构：
+
+```python
+@dataclass
+class ChatResult:
+    assistant_message: AssistantMessage
+    tool_calls: list[ToolCall]
+    content: str | None
+    raw: dict
+    usage: TokenUsage | None
+```
+
+但是注意：
+**raw 不能丢。**
+
+因为 MiMo 的 `reasoning_content`、部分 provider 的扩展字段、streaming chunk 中的特殊字段，都需要保留。
+
+---
+
+# 5. 关键抽象三：TranscriptSerializer
+
+这个模块专门解决“不同模型历史消息怎么回传”。
+
+```python
+class TranscriptSerializer:
+    def serialize(
+        self,
+        messages: list[AgentMessage],
+        profile: ModelProfile,
+    ) -> list[dict]:
+        ...
+```
+
+普通模型：
+
+```python
+{
+  "role": "assistant",
+  "content": "...",
+  "tool_calls": [...]
+}
+```
+
+MiMo thinking mode：
+
+```python
+{
+  "role": "assistant",
+  "content": "...",
+  "tool_calls": [...],
+  "reasoning_content": "..."
+}
+```
+
+这个点非常重要。
+
+你可以在简历里写：
+
+> Implemented a provider-aware transcript serialization layer that preserves model-specific reasoning state across multi-turn tool calls.
+
+这比“我会调 OpenAI API”高级不少。
+
+---
+
+# 6. agent loop 怎么写
+
+MVP loop：
+
+```text
+1. load task
+2. load model profile
+3. build messages
+4. call llm
+5. if tool_call:
+     validate tool args
+     run tool
+     append observation
+     save trajectory
+     continue
+6. else:
+     ask model to call finish or stop
+7. output summary + git diff
+```
+
+伪代码：
+
+```python
+def run_agent(task: str, config: AgentConfig):
+    profile = ModelProfileRegistry.get(config.model)
+
+    state = AgentState(task=task)
+
+    for step in range(config.max_steps):
+        messages = context_packer.build(state, profile)
+
+        result = llm.chat(
+            messages=messages,
+            tools=tool_registry.schemas(profile),
+            profile=profile,
+        )
+
+        state.add_assistant_message(result.assistant_message)
+
+        if result.tool_calls:
+            for call in result.tool_calls:
+                validated = tool_registry.validate(call)
+
+                if not validated.ok:
+                    repaired = repair_tool_call(call, validated.error, profile)
+                    call = repaired
+
+                tool_result = tool_registry.run(call, state.tool_context)
+
+                state.add_tool_result(call, tool_result)
+                trajectory.log_tool_call(step, call, tool_result)
+
+            continue
+
+        state.add_text_response(result.content)
+
+        if state.is_finished():
+            break
+
+    return FinalResult(
+        summary=state.summary,
+        diff=git.diff(),
+        trajectory=trajectory.path,
+    )
+```
+
+这里 MiMo 专属逻辑没有进入 `run_agent`，都藏在：
+
+```text
+profile
+llm client
+transcript serializer
+prompt profile
+tool schema renderer
+```
+
+---
+
+# 7. 怎么兼容大部分模型
+
+核心方法是：**统一内部协议，外部 adapter 差异化。**
+
+内部统一：
+
+```text
+AgentMessage
+AssistantMessage
+ToolCall
+ToolResult
+ToolSchema
+ChatResult
+ModelProfile
+```
+
+外部差异：
+
+```text
+OpenAI-compatible adapter
+Anthropic adapter
+Claude proxy adapter
+Local vLLM adapter
+MiMo profile
+Qwen profile
+DeepSeek profile
+OpenRouter profile
+```
+
+兼容层要处理这些差异：
+
+| 差异                       | 放在哪里处理                              |
+| ------------------------ | ----------------------------------- |
+| endpoint 不同              | ProviderConfig                      |
+| auth header 不同           | LLMClient                           |
+| tool_calls 格式不同          | ResponseNormalizer                  |
+| reasoning_content 是否需要回传 | TranscriptSerializer + ModelProfile |
+| max_tokens 参数名不同         | RequestBuilder                      |
+| thinking 参数不同            | ModelProfile                        |
+| streaming chunk 不同       | StreamParser                        |
+| temperature 推荐值不同        | ModelProfile                        |
+| tool schema 支持程度不同       | ToolSchemaRenderer                  |
+
+你的核心 agent 只关心：
+
+```python
+result.tool_calls
+result.assistant_message
+tool_result
+```
+
+不关心背后是 MiMo、GPT、Qwen、DeepSeek。
+
+---
+
+# 8. 怎么对 MiMo 做专门优化
+
+重点优化 6 个地方。
+
+## 1. reasoning_content preservation
+
+这是 MiMo 第一优先级。
+
+实现：
+
+```text
+- 保存完整 assistant raw message
+- 单独提取 reasoning_content
+- trajectory 里记录 reasoning_content 是否存在
+- 下一轮请求自动回填 reasoning_content
+- context compact 时不能随便丢 reasoning_content
+```
+
+但注意：
+
+```text
+reasoning_content 是协议状态，不是给用户展示的内容
+```
+
+所以日志可以保存，但默认不要在 UI 里暴露。
+
+---
+
+## 2. MiMo prompt profile
+
+给 MiMo 单独 prompt：
+
+```text
+prompts/
+  generic_coding_agent.md
+  mimo_coding_agent.md
+  mimo_tool_repair.md
+  mimo_review_agent.md
+```
+
+MiMo prompt 重点写：
+
+```text
+- 一次只调用一个工具
+- 不要编造文件内容
+- 修改必须用 apply_patch
+- bash 命令要短且可解释
+- 工具失败后先分析 observation
+- 完成时必须调用 finish
+```
+
+不要把这些硬编码进 agent loop。
+
+---
+
+## 3. MiMo tool schema profile
+
+MiMo 第一版工具 schema 用扁平结构。
+
+例如 bash：
+
+```json
+{
+  "name": "bash",
+  "description": "Run a shell command in the sandbox.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "cmd": {
+        "type": "string"
+      },
+      "timeout_sec": {
+        "type": "integer"
+      }
+    },
+    "required": ["cmd"]
+  }
+}
+```
+
+不要第一版上这种复杂结构：
+
+```json
+{
+  "command": {
+    "program": "...",
+    "args": [],
+    "env": {},
+    "retry": {
+      "max_attempts": 3
+    }
+  }
+}
+```
+
+原因：coding agent 的难点不在 schema 炫技，而在多轮稳定性。
+
+---
+
+## 4. observation compressor
+
+MiMo 支持长上下文，但不要滥用。
+
+默认策略：
+
+```text
+- bash 输出只保留 head/tail/error lines
+- pytest 输出提取失败测试、traceback、assertion
+- grep 输出限制 top-k
+- read_file 限制行数
+- git diff 做 summary + raw patch 双轨保存
+```
+
+也就是说：
+
+```text
+原始日志保存到 trajectory
+压缩 observation 送回模型
+```
+
+这样既可复现，又不污染上下文。
+
+---
+
+## 5. Pro / Flash 路由
+
+后期可以做：
+
+```python
+class ModelRouter:
+    def select(self, task_type: TaskType) -> str:
+        if task_type in ["plan", "implement", "review", "audit"]:
+            return "mimo-v2-pro"
+        if task_type in ["summarize_log", "compress_context", "grep_summary"]:
+            return "mimo-v2-flash"
+```
+
+初期不用真的多模型并发，先预留接口即可。
+
+---
+
+## 6. MiMo eval harness
+
+你要用数据说明 MiMo 优化有没有用。
+
+最小 eval：
+
+```text
+evals/
+  tool_call/
+    simple_tool.yaml
+    multi_turn_tool.yaml
+    invalid_args_repair.yaml
+    long_observation.yaml
+
+  coding/
+    python_bug_001/
+    python_bug_002/
+    js_bug_001/
+```
+
+指标：
+
+```text
+tool_call_valid_rate
+tool_name_accuracy
+argument_schema_accuracy
+multi_turn_success_rate
+reasoning_content_replay_success
+repair_success_rate
+tests_pass_rate
+avg_steps
+avg_tokens
+avg_latency
+patch_size
+```
+
+这样你可以比较：
+
+```text
+generic profile vs mimo profile
+complex schema vs flat schema
+full observation vs compressed observation
+pro vs flash
+```
+
+这才叫“针对 MiMo 优化”，不是调 prompt 玄学。
+
+---
+
+# 9. 最小开发顺序
+
+按这个顺序做最稳：
+
+```text
+Step 1: mimo-lab probe
+  - 验证 endpoint/auth/tool_calls/reasoning_content/streaming
+
+Step 2: ModelProfile
+  - generic openai-compatible
+  - mimo-v2-pro
+  - mimo-v2-flash
+
+Step 3: LLMClient
+  - OpenAICompatibleClient
+  - RequestBuilder
+  - ResponseNormalizer
+  - TranscriptSerializer
+
+Step 4: 最小 tool system
+  - list_files
+  - read_file
+  - grep
+  - bash
+  - apply_patch
+  - git_diff
+  - finish
+
+Step 5: 单 agent loop
+  - max_steps
+  - one tool call per step
+  - tool validation
+  - repair invalid tool call
+
+Step 6: Docker sandbox
+  - timeout
+  - network off
+  - output truncation
+  - dangerous command policy
+
+Step 7: trajectory
+  - messages.jsonl
+  - tool_calls.jsonl
+  - final.patch
+  - metrics.json
+
+Step 8: MiMo eval harness
+  - tool-call eval
+  - coding fixture eval
+  - profile comparison
+```
+
+第一版不要做：
+
+```text
+多 agent
+复杂 memory
+LangGraph
+MCP
+TUI
+浏览器工具
+完整 SWE-bench
+```
+
+---
+
+# 10. 最终项目定位
+
+我建议项目定位写成：
+
+> **一个 model-profile-driven CLI coding agent runtime，核心兼容 OpenAI-compatible 模型，并对 MiMo 的 thinking/tool-call 协议、reasoning_content 回传、长上下文和 Pro/Flash 路由做一等优化。**
+
+技术上就是：
+
+```text
+Core Runtime:
+  - agent loop
+  - tool registry
+  - sandbox
+  - context packer
+  - trajectory
+  - harness
+
+Model Layer:
+  - OpenAI-compatible client
+  - model profile
+  - transcript serializer
+  - response normalizer
+  - prompt profile
+
+MiMo Optimization:
+  - reasoning_content preservation
+  - flat tool schema
+  - MiMo prompt profile
+  - observation compression
+  - Pro/Flash routing
+  - MiMo-specific eval harness
+```
+
+最关键的一句话：
+
+> **不要写一个 MiMo-only agent；要写一个通用 code-agent runtime，然后把 MiMo 做成第一个被完整 profiling 和深度优化的模型。**
+
+[1]: https://platform.xiaomimimo.com/docs/en-US/api/chat/openai-api "Xiaomi MiMo API Open Platform"
+[2]: https://mimo.xiaomi.com/mimo-v2-pro "MiMo-V2-Pro | Xiaomi"
+[3]: https://github.com/xiaomimimo/MiMo-V2-Flash "GitHub - XiaomiMiMo/MiMo-V2-Flash: MiMo-V2-Flash: Efficient Reasoning, Coding, and Agentic Foundation Model · GitHub"

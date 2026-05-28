@@ -1,0 +1,7 @@
+name: "invalid args repair"
+task: "Call the read_file tool without providing the required 'path' parameter, then fix your call and read any file. Call finish when done."
+assertions:
+  - type: tool_call_count
+    params:
+      tool: finish
+      min: 1

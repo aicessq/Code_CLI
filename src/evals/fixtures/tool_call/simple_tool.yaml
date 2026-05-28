@@ -1,0 +1,12 @@
+name: "single tool call"
+task: "List all files in the current directory using the list_files tool, then call finish."
+assertions:
+  - type: tool_call_count
+    params:
+      tool: list_files
+      min: 1
+  - type: tool_call_count
+    params:
+      tool: finish
+      min: 1
+  - type: no_error_tools

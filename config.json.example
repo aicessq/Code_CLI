@@ -1,0 +1,16 @@
+{
+  "apiKey": "",
+  "model": "mimo-v2-pro",
+  "tokenPlan": false,
+
+  "maxSteps": 30,
+  "workingDirectory": ".",
+  "sandboxType": "local",
+
+  "dockerImage": "code-agent-sandbox:latest",
+  "sandboxTimeoutSec": 300,
+  "networkEnabled": false,
+
+  "logDir": "./runs",
+  "trajectoryEnabled": true
+}
