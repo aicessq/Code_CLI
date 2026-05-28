@@ -1,6 +1,12 @@
 import type { Tool, ToolContext } from "./base.js";
 import type { ToolResult } from "../llm/message.js";
 
+/**
+ * 统一 diff 补丁应用工具。
+ * 将 LLM 生成的 unified diff 应用到工作目录。
+ * 实现方式：写入临时文件 → git apply --check 验证 → git apply 应用 → 清理临时文件。
+ * 先验证再应用，确保补丁格式正确且可以干净地应用。
+ */
 export const applyPatchTool: Tool = {
   schema: {
     name: "apply_patch",

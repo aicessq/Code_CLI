@@ -1,6 +1,12 @@
 import type { Tool, ToolContext } from "./base.js";
 import type { ToolResult } from "../llm/message.js";
 
+/**
+ * 基于 ripgrep 的文件内容搜索工具。
+ * 支持正则表达式，结果限制为 100 行以防止输出过大。
+ * 执行策略：先尝试 -l（仅文件名），如有结果则返回文件名；
+ * 否则回退到带行号的全文匹配（-n --no-heading），截取前 100 行。
+ */
 export const grepTool: Tool = {
   schema: {
     name: "grep",

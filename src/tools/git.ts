@@ -1,6 +1,11 @@
 import type { Tool, ToolContext } from "./base.js";
 import type { ToolResult } from "../llm/message.js";
 
+/**
+ * Git 状态查看工具（git status --short）。
+ * 显示工作树的简短状态，包括暂存区和工作目录的变更。
+ */
+
 export const gitStatusTool: Tool = {
   schema: {
     name: "git_status",
@@ -19,6 +24,11 @@ export const gitStatusTool: Tool = {
     };
   },
 };
+
+/**
+ * Git diff 查看工具。
+ * 默认显示未暂存的变更，传入 staged=true 显示已暂存的变更。
+ */
 
 export const gitDiffTool: Tool = {
   schema: {

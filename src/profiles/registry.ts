@@ -7,6 +7,11 @@ import { DEEPSEEK_V3 } from "./deepseek.js";
 import { QWEN_MAX } from "./qwen.js";
 import { CLAUDE_PROXY } from "./claude_proxy.js";
 
+/**
+ * 全局模型 profile 注册表。
+ * 预注册所有支持的模型，config.resolveConfig() 通过 profileRegistry.get(modelName) 查找。
+ * 添加新模型：在 src/profiles/ 下创建 .ts 文件定义 ModelProfile，然后在此注册。
+ */
 const registry = new ModelProfileRegistry();
 
 registry.register(MIMO_V2_PRO);

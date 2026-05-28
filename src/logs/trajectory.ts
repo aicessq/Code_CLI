@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { ChatResult, ToolCall, ToolResult } from "../llm/message.js";
 import type { AgentState } from "../agent/state.js";
 
+/** 工具调用日志条目结构 */
 export interface ToolCallLogEntry {
   step: number;
   toolCall: { id: string; name: string; arguments: Record<string, unknown> };
@@ -10,6 +11,15 @@ export interface ToolCallLogEntry {
   timestamp: string;
 }
 
+/**
+ * Agent 运行轨迹日志记录器。
+ *
+ * 将每次 agent 运行的详细信息记录为 JSONL 文件，用于调试和评估。
+ * 每次运行创建一个以时间戳命名的目录，包含：
+ * - messages.jsonl: assistant 消息日志（含 token 使用和 reasoning 状态）
+ * - tool_calls.jsonl: 工具调用日志（含参数和结果）
+ * - metrics.json: 运行汇总指标（总步数、工具调用数、错误数、token 消耗等）
+ */
 export class TrajectoryLogger {
   readonly outputDir: string;
   private metrics = {
@@ -28,6 +38,7 @@ export class TrajectoryLogger {
     mkdirSync(this.outputDir, { recursive: true });
   }
 
+  /** 记录 assistant 消息（每步一次） */
   logAssistantTurn(step: number, result: ChatResult): void {
     this.metrics.assistantTurns++;
     this.metrics.totalSteps = step + 1;
@@ -53,6 +64,7 @@ export class TrajectoryLogger {
     appendFileSync(join(this.outputDir, "messages.jsonl"), JSON.stringify(entry) + "\n");
   }
 
+  /** 记录工具调用（每次工具执行一次） */
   logToolCall(step: number, call: ToolCall, result: ToolResult): void {
     this.metrics.toolCallsMade++;
     if (result.isError) this.metrics.errorToolCalls++;
@@ -67,6 +79,7 @@ export class TrajectoryLogger {
     appendFileSync(join(this.outputDir, "tool_calls.jsonl"), JSON.stringify(entry) + "\n");
   }
 
+  /** 写入最终汇总指标（任务结束时调用） */
   writeFinal(state: AgentState): void {
     const metricsData = {
       ...this.metrics,

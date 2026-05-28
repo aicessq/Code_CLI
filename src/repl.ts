@@ -15,6 +15,20 @@ import { applyPatchTool } from "./tools/apply_patch.js";
 import { gitStatusTool, gitDiffTool } from "./tools/git.js";
 import type { Sandbox } from "./sandbox/base.js";
 
+/**
+ * REPL 和单次任务执行 UI。
+ *
+ * 提供两种运行模式：
+ * 1. executeTask(): 一次性执行单个任务（CLI 参数模式）
+ * 2. startREPL(): 交互式 REPL，支持多轮对话和斜杠命令
+ *
+ * buildCallbacks() 构造 AgentCallbacks，将 agent 的流式事件渲染为 ANSI 彩色输出：
+ * - reasoning tokens: 暗色品红色（"thinking..." 前缀）
+ * - content tokens: 白色，实时流式输出
+ * - 工具调用: emoji 图标 + 青色工具名 + 暗色参数
+ * - 工具结果: 绿色 ✓ / 红色 ✗ + 截断预览
+ */
+
 // ── ANSI helpers ──────────────────────────────────────────────
 
 const c = {
@@ -124,6 +138,16 @@ function showConfig(settings: Settings) {
 
 // ── Build callbacks for streaming + tool display ──────────────
 
+/**
+ * 构造 AgentCallbacks，将 agent 事件渲染为 ANSI 彩色终端输出。
+ *
+ * 流式输出的状态机：
+ * - onReasoningToken: 进入 reasoning 模式，暗色品红输出
+ * - onToken: 退出 reasoning 模式（如果在），白色输出
+ * - onToolCallStart: 退出 reasoning 模式（如果在），换行准备显示工具信息
+ * - onToolExecute: 显示工具图标、名称和参数预览
+ * - onToolResult: 显示成功/失败图标和结果预览
+ */
 function buildCallbacks(): AgentCallbacks {
   let inReasoning = false;
 
@@ -176,6 +200,11 @@ function buildCallbacks(): AgentCallbacks {
 
 // ── Execute task ──────────────────────────────────────────────
 
+/**
+ * 一次性执行单个任务（CLI 参数模式）。
+ * 解析配置 → 创建 LLM 客户端和沙箱 → 运行 agent loop → 显示结果 → 清理沙箱。
+ * 错误处理：401 显示 API key 提示，404 显示 baseURL 提示，其他显示原始错误。
+ */
 export async function executeTask(task: string, settings: Settings): Promise<void> {
   let config: ResolvedConfig;
   try {
@@ -241,6 +270,11 @@ export async function executeTask(task: string, settings: Settings): Promise<voi
 
 // ── REPL ──────────────────────────────────────────────────────
 
+/**
+ * 启动交互式 REPL。
+ * 支持斜杠命令（/help, /provider, /config, /clear, /quit）和任务输入。
+ * 每次输入任务时调用 executeTask()，REPL 在任务间保持活跃。
+ */
 export async function startREPL(settings: Settings) {
   const rl = readline.createInterface({
     input: process.stdin,

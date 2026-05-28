@@ -1,6 +1,11 @@
 import type { Tool, ToolContext } from "./base.js";
 import type { ToolResult } from "../llm/message.js";
 
+/**
+ * 目录列表工具。
+ * 列出指定路径下的文件和目录，通过 sandbox.listFiles() 实现。
+ * 路径相对于工作目录解析。
+ */
 export const listFilesTool: Tool = {
   schema: {
     name: "list_files",

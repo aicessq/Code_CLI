@@ -4,6 +4,19 @@ import { join, resolve } from "node:path";
 import type { Sandbox, SandboxResult } from "./base.js";
 import { CommandPolicy } from "./policy.js";
 
+/**
+ * 本地沙箱实现。
+ *
+ * 在本地 bash 进程中执行命令，通过 CommandPolicy 过滤危险命令。
+ * 安全特性：
+ * - 命令执行前经过 CommandPolicy 检查，阻止 rm -rf /、fork bomb 等
+ * - 输出截断为 50K 字符，防止内存溢出
+ * - 超时后发送 SIGKILL 强制终止
+ * - TERM=dumb 禁用 ANSI 转义序列
+ *
+ * 注意：这是最轻量的沙箱，适合开发和测试。
+ * 生产环境应使用 DockerSandbox 获得更强的隔离。
+ */
 export class LocalSandbox implements Sandbox {
   private policy = new CommandPolicy();
   private workDir: string;
@@ -13,6 +26,7 @@ export class LocalSandbox implements Sandbox {
   }
 
   async execute(command: string, options?: { timeoutSec?: number }): Promise<SandboxResult> {
+    // 命令策略检查：阻止危险命令
     const check = this.policy.check(command);
     if (!check.allowed) {
       return {
@@ -45,6 +59,7 @@ export class LocalSandbox implements Sandbox {
         stderr += data.toString();
       });
 
+      // 超时保护：Node.js spawn 的 timeout 可能不可靠，手动设置 SIGKILL
       const timer = setTimeout(() => {
         proc.kill("SIGKILL");
       }, timeoutMs);
@@ -83,6 +98,10 @@ export class LocalSandbox implements Sandbox {
     });
   }
 
+  /**
+   * 读取文件内容，带行号前缀。
+   * 输出格式：`行号\t内容`（类似 cat -n），方便模型定位代码位置。
+   */
   async readFile(path: string, startLine?: number, endLine?: number): Promise<string> {
     const fullPath = resolve(this.workDir, path);
 
@@ -102,6 +121,7 @@ export class LocalSandbox implements Sandbox {
       .join("\n");
   }
 
+  /** 列出目录条目，目录名带 / 后缀以便区分 */
   async listFiles(path: string): Promise<string[]> {
     const fullPath = resolve(this.workDir, path);
 
@@ -116,6 +136,7 @@ export class LocalSandbox implements Sandbox {
     });
   }
 
+  /** 本地沙箱无需清理资源 */
   async destroy(): Promise<void> {
     // Nothing to clean up for local sandbox
   }

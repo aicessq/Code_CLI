@@ -1,3 +1,16 @@
+/**
+ * 工具输出智能压缩器。
+ *
+ * 根据工具类型采用不同的压缩策略，在保留关键信息的前提下减少 token 消耗。
+ * 已构建但尚未集成到 agent loop 中（当前直接发送原始输出）。
+ *
+ * 压缩策略：
+ * - bash: 保留前 20 行 + 后 20 行 + 所有错误行
+ * - bash (pytest): 提取 FAILED 用例、断言错误、traceback 头和汇总行
+ * - grep: 限制最多 50 条匹配
+ * - read_file: 直接截断（已由行范围限制）
+ * - 其他: 头尾各保留一半
+ */
 export class ObservationCompressor {
   private maxOutputChars: number;
 
@@ -5,6 +18,10 @@ export class ObservationCompressor {
     this.maxOutputChars = maxOutputChars;
   }
 
+  /**
+   * 压缩工具输出。
+   * 短于阈值的输出直接返回，超过阈值则按工具类型选择压缩策略。
+   */
   compress(toolName: string, rawOutput: string): string {
     if (rawOutput.length <= this.maxOutputChars) return rawOutput;
 
@@ -20,15 +37,20 @@ export class ObservationCompressor {
     }
   }
 
+  /**
+   * bash 输出压缩。
+   * 检测是否为 pytest 输出（包含 FAILED/PASSED/ERRORS），
+   * 是则使用 pytest 专用压缩，否则保留头尾 + 错误行。
+   */
   private compressBash(output: string): string {
     const lines = output.split("\n");
 
-    // Check for pytest-style output
+    // 检测 pytest 输出格式
     if (output.includes("FAILED") || output.includes("PASSED") || output.includes("ERRORS")) {
       return this.compressPytest(lines);
     }
 
-    // General bash: keep first 20 lines + last 20 lines + error lines
+    // 通用 bash：保留前 20 行 + 后 20 行 + 错误行
     const errorKeywords = /error|Error|ERR|fail|Fail|FAIL|exception|Exception|panic|PANIC/i;
     const errorLines: string[] = [];
 
@@ -52,42 +74,37 @@ export class ObservationCompressor {
     return result.slice(0, this.maxOutputChars);
   }
 
+  /** pytest 输出压缩：保留 FAILED 用例、断言错误、traceback 和汇总 */
   private compressPytest(lines: string[]): string {
     const result: string[] = [];
     let inSummary = false;
 
     for (const line of lines) {
-      // Keep FAILED lines
       if (line.includes("FAILED")) {
         result.push(line);
         continue;
       }
 
-      // Keep short test summary section
       if (line.includes("short test summary") || line.includes("===")) {
         inSummary = true;
         result.push(line);
         continue;
       }
 
-      // Keep assert lines
       if (line.trim().startsWith("assert") || line.trim().startsWith("AssertionError")) {
         result.push(line);
         continue;
       }
 
-      // Keep traceback headers
       if (line.trim().startsWith("E ") || line.includes("Error") || line.includes("Exception")) {
         result.push(line);
         continue;
       }
 
-      // Keep summary section lines
       if (inSummary && line.trim()) {
         result.push(line);
       }
 
-      // Keep final result line
       if (line.includes("passed") || line.includes("failed") || line.includes("error")) {
         result.push(line);
       }
@@ -96,6 +113,7 @@ export class ObservationCompressor {
     return result.join("\n").slice(0, this.maxOutputChars);
   }
 
+  /** grep 输出压缩：限制最多 50 条匹配结果 */
   private compressGrep(output: string): string {
     const lines = output.split("\n");
     const maxMatches = 50;
@@ -108,11 +126,12 @@ export class ObservationCompressor {
     return `${kept.join("\n")}\n[${omitted} more matches omitted]`.slice(0, this.maxOutputChars);
   }
 
+  /** 文件读取压缩：已由行范围限制，直接截断 */
   private compressFileRead(output: string): string {
-    // Already bounded by line range, just truncate
     return this.truncate(output);
   }
 
+  /** 通用截断：保留头尾各一半 */
   private truncate(output: string): string {
     if (output.length <= this.maxOutputChars) return output;
 
