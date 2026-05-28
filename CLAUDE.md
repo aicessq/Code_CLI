@@ -30,7 +30,25 @@ npm run eval:coding    # Coding task evals
 - **`ModelProfile`** (`src/llm/model_profile.ts`): capability flags only (no endpoint/apiKey). `maxTokensParamName` is derived from `provider` via `getMaxTokensParamName()`.
 - **`TranscriptSerializer`** (`src/llm/transcript.ts`): serializes `AgentMessage[]` to wire format, conditionally including `reasoning_content`
 - **`ResponseNormalizer`** (`src/llm/response_normalizer.ts`): extracts `reasoning_content` from raw API responses
-- **`StreamParser`** (`src/llm/stream_parser.ts`): accumulates `delta.reasoning_content` separately from `delta.content`
+- **`StreamParser`** (`src/llm/stream_parser.ts`): accumulates `delta.reasoning_content` separately from `delta.content`, fires `StreamCallbacks` on each token
+
+### Callback / Streaming System
+
+Two-layer callback interface hierarchy. A single callbacks object flows from REPL through the entire pipeline:
+
+```
+buildCallbacks() in repl.ts
+  → runAgent(task, { callbacks })           // AgentCallbacks
+    → llm.chat(..., callbacks)              // passed as StreamCallbacks
+      → new StreamParser(callbacks)         // fires onToken/onReasoningToken/onToolCallStart
+    → config.callbacks?.onToolExecute(...)  // fires agent lifecycle events
+```
+
+**`StreamCallbacks`** (`src/llm/stream_parser.ts`): low-level streaming — `onToken`, `onReasoningToken`, `onToolCallStart`, `onToolCallDelta`
+
+**`AgentCallbacks extends StreamCallbacks`** (`src/agent/loop.ts`): adds lifecycle — `onStepStart`, `onToolExecute`, `onToolResult`, `onStepEnd`
+
+**`LLMClient.chat()`** signature: `(messages, tools, profile, stream?, callbacks?) => Promise<ChatResult>`
 
 ### reasoning_content Protocol (MiMo/DeepSeek Critical)
 
@@ -51,15 +69,28 @@ Search order: `~/.mimocoding/settings.json` → `./mimocoding.json` → `./setti
 ### Wiring Pattern
 
 ```
-src/index.ts (CLI entry)
+src/index.ts (CLI entry — commander)
   → loadSettings() → resolveConfig()
-  → src/repl.ts (REPL or one-shot)
-    → OpenAICompatibleClient(apiKey, baseURL)
-    → ToolRegistry (7 tools + finish via createFinishTool callback)
-    → LocalSandbox / DockerSandbox
-    → TrajectoryLogger
-    → runAgent(task, config)
+  → src/repl.ts
+    → executeTask(task, settings)   // one-shot mode
+    → startREPL(settings)           // interactive mode
+      → buildCallbacks()            // constructs AgentCallbacks with ANSI UI
+      → OpenAICompatibleClient(apiKey, baseURL)
+      → ToolRegistry (7 tools + finish via createFinishTool callback)
+      → LocalSandbox / DockerSandbox
+      → TrajectoryLogger
+      → runAgent(task, { callbacks, ... })
 ```
+
+### REPL UI (`src/repl.ts`)
+
+ANSI color helpers in `c` object. `buildCallbacks()` constructs `AgentCallbacks` that render:
+- Reasoning tokens: dimmed magenta with "thinking..." prefix
+- Content tokens: white, streamed in real-time
+- Tool calls: emoji icon + cyan name + dimmed args
+- Tool results: green ✓ / red ✗ + truncated preview
+
+`executeTask()` handles one-shot mode; `startREPL()` handles interactive mode with `/help`, `/provider`, `/config`, `/clear`, `/quit` commands.
 
 ### Components Built But Not Yet Integrated
 
