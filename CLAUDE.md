@@ -82,6 +82,20 @@ src/index.ts (CLI entry — commander)
       → runAgent(task, { callbacks, ... })
 ```
 
+### Memory System (`src/memory/`)
+
+Three-scope layered memory, similar to Claude Code's design:
+
+| Scope | Directory | Purpose | Git-tracked |
+|-------|-----------|---------|-------------|
+| `global` | `~/.mimocoding/memory/` | User habits (language, code style) | No |
+| `project` | `<cwd>/.mimocoding/memory/` | Project decisions, tech stack | Yes |
+| `local` | `<cwd>/.mimocoding/memory-local/` | Machine-specific, internal URLs | No |
+
+Each scope has its own `MemoryStore` (file CRUD with YAML frontmatter) + `MemoryIndex` (MEMORY.md index). `MemoryLoader` merges all three into the system prompt via `buildMemoryContext()`.
+
+Memory tools: `save_memory` (with `scope` param), `list_memories` (groups by scope), `delete_memory`.
+
 ### REPL UI (`src/repl.ts`)
 
 ANSI color helpers in `c` object. `buildCallbacks()` constructs `AgentCallbacks` that render:
@@ -90,13 +104,7 @@ ANSI color helpers in `c` object. `buildCallbacks()` constructs `AgentCallbacks`
 - Tool calls: emoji icon + cyan name + dimmed args
 - Tool results: green ✓ / red ✗ + truncated preview
 
-`executeTask()` handles one-shot mode; `startREPL()` handles interactive mode with `/help`, `/provider`, `/config`, `/clear`, `/quit` commands.
-
-### Components Built But Not Yet Integrated
-
-- `ContextPacker` and `ObservationCompressor` in `src/context/` — agent loop sends raw `state.messages` without token management
-- `RepoMap` generates directory trees but is never called
-- `ToolCallRepairer` hardcodes prompt inline instead of loading `src/prompts/mimo_tool_repair.md`
+`executeTask()` handles one-shot mode; `startREPL()` handles interactive mode with `/help`, `/provider`, `/config`, `/memory`, `/clear`, `/quit` commands.
 
 ## Conventions
 
