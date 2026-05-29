@@ -157,9 +157,11 @@ export class StreamParser {
       role: "assistant" as const,
       content: this.content || null,
       toolCalls,
-      reasoningContent: profile.requiresReasoningContentReplay && this.reasoningContent
-        ? this.reasoningContent
-        : this.reasoningContent || null,
+      // reasoningContent 仅在需要 replay 时保留（MiMo/DeepSeek 协议要求）
+      // 其他模型不需要在后续消息中回传 reasoning_content
+      reasoningContent: profile.requiresReasoningContentReplay
+        ? (this.reasoningContent || null)
+        : null,
       raw: { content: this.content, reasoning_content: this.reasoningContent, tool_calls: toolCalls },
     };
 

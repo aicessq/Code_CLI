@@ -3,28 +3,29 @@
  *
  * 这是整个系统的核心编排逻辑。
  * 它实现了 "观察-思考-行动" 循环:
- *   1. 构建消息列表（观察）
+ *   1. 构建消息列表（观察）→ ContextPacker 压缩以适应 token 预算
  *   2. 调用 LLM 获取响应（思考）
- *   3. 执行工具调用（行动）
+ *   3. 执行工具调用（行动）→ ObservationCompressor 压缩工具输出
  *   4. 重复直到任务完成或达到最大步数
  *
  * 关键设计不变量:
  * - runAgent 函数永不检查 profile.name 或 profile.provider
  * - 所有模型特异性行为封装在 profile、llm.chat()、TranscriptSerializer 和 PromptLoader 中
- * - 工具调用是顺序执行的（一个接一个），不支持并行
  * - 如果模型不调用工具，发送提示消息要求调用 finish
  *
  * 数据流:
- *   AgentState.messages → llm.chat() → ChatResult
+ *   AgentState.messages → ContextPacker.build() → llm.chat() → ChatResult
  *   ChatResult.toolCalls → ToolRegistry.validate() → ToolRegistry.run()
- *   ToolResult → AgentState.addToolResult() → 下一轮 llm.chat()
+ *   ToolResult → ObservationCompressor.compress() → AgentState.addToolResult()
  *
- * 注意: ContextPacker 和 ObservationCompressor 已实现但尚未集成到此循环中。
- * 当前直接使用 state.messages，可能导致长任务的上下文溢出。
+ * 上下文管理:
+ * - ContextPacker: 在每次 LLM 调用前压缩消息列表以适应 token 预算
+ * - ObservationCompressor: 在存储工具结果前压缩过长的输出
+ * - RepoMap: 注入项目目录树到 system prompt，让模型了解项目结构
  */
 import type { LLMClient } from "../llm/base.js";
 import type { ModelProfile } from "../llm/model_profile.js";
-import type { AgentMessage } from "../llm/message.js";
+import type { AgentMessage, ToolResult } from "../llm/message.js";
 import type { StreamCallbacks } from "../llm/stream_parser.js";
 import { AgentState } from "./state.js";
 import { PromptLoader } from "./prompt.js";
@@ -33,6 +34,9 @@ import type { ToolRegistry } from "../tools/registry.js";
 import type { Sandbox } from "../sandbox/base.js";
 import type { TrajectoryLogger } from "../logs/trajectory.js";
 import { createFinishTool } from "../tools/finish.js";
+import { ContextPacker } from "../context/packer.js";
+import { ObservationCompressor } from "../context/observation_compressor.js";
+import { RepoMap } from "../context/repo_map.js";
 
 export interface AgentCallbacks extends StreamCallbacks {
   onStepStart?: (step: number) => void;
@@ -90,6 +94,9 @@ export async function runAgent(task: string, config: AgentConfig): Promise<Final
   const { profile, llm, registry, sandbox } = config;
   const promptLoader = new PromptLoader();
   const repairer = new ToolCallRepairer();
+  const packer = new ContextPacker();
+  const compressor = new ObservationCompressor(profile.maxObservationTokens * 3); // tokens → chars approximation
+  const repoMap = new RepoMap();
 
   // 初始化 Agent 状态（消息历史、工具上下文）
   const state = new AgentState(task, config.workingDirectory, sandbox);
@@ -102,17 +109,28 @@ export async function runAgent(task: string, config: AgentConfig): Promise<Final
   // ========== 阶段 1: 加载系统 Prompt ==========
   // PromptLoader 从 src/prompts/*.md 加载模板
   // 模板中的 {task_description} 和 {tool_names} 会被替换
+  // 注入 RepoMap 让模型了解项目结构
   const systemPrompt = promptLoader.load(profile.promptProfile);
+  let repoTree = "";
+  try {
+    repoTree = repoMap.generate(config.workingDirectory);
+  } catch {
+    // 仓库目录树生成失败不影响主流程
+  }
+
   state.addSystemMessage(
     systemPrompt
       .replace("{task_description}", task)
       .replace("{tool_names}", registry.list().map((t) => t.schema.name).join(", "))
+      + (repoTree ? `\n\nProject structure:\n\`\`\`\n${repoTree}\n\`\`\`` : "")
   );
 
   // ========== 阶段 2: 主循环 ==========
   for (let step = 0; step < config.maxSteps; step++) {
     config.callbacks?.onStepStart?.(step);
-    const messages = [...state.messages];
+
+    // ContextPacker: 压缩消息列表以适应 token 预算
+    const messages = packer.build(state, profile);
 
     const result = await llm.chat(
       messages,
@@ -122,55 +140,20 @@ export async function runAgent(task: string, config: AgentConfig): Promise<Final
       config.callbacks  // pass stream callbacks
     );
 
-    // Print newline after streaming
-    if (profile.supportsStreaming && (config.callbacks?.onToken || config.callbacks?.onReasoningToken)) {
-      process.stdout.write("\n");
-    }
+    // 通知回调流式输出结束（UI 层负责渲染换行，agent 层不直接操作 stdout）
+    config.callbacks?.onStepEnd?.(step);
 
     state.addAssistantMessage(result.assistantMessage);
     config.trajectoryLogger?.logAssistantTurn(step, result);
 
     // ========== 处理工具调用 ==========
     if (result.toolCalls.length > 0) {
-      for (const call of result.toolCalls) {
-        const validation = registry.validate(call);
-
-        if (!validation.ok) {
-          const repaired = await repairer.repair(call, validation.error!, profile, llm);
-          if (repaired) {
-            config.callbacks?.onToolExecute?.(repaired.name, repaired.arguments);
-            const toolResult = await registry.run(repaired, state.toolContext);
-            state.addToolResult(repaired, toolResult);
-            config.trajectoryLogger?.logToolCall(step, repaired, toolResult);
-            config.callbacks?.onToolResult?.(repaired.name, toolResult.content, toolResult.isError);
-          } else {
-            state.addToolResult(call, {
-              toolCallId: call.id,
-              name: call.name,
-              content: `Tool call validation failed: ${validation.error}. Repair also failed.`,
-              isError: true,
-            });
-          }
-        } else {
-          config.callbacks?.onToolExecute?.(call.name, call.arguments);
-          const toolResult = await registry.run(call, state.toolContext);
-          state.addToolResult(call, toolResult);
-          config.trajectoryLogger?.logToolCall(step, call, toolResult);
-          config.callbacks?.onToolResult?.(call.name, toolResult.content, toolResult.isError);
-
-          if (call.name === "finish" && state.isFinished()) {
-            break;
-          }
-        }
-      }
-
-      config.callbacks?.onStepEnd?.(step);
+      await executeToolCalls(result.toolCalls, step, state, config, profile, llm, registry, repairer, compressor);
       if (state.isFinished()) break;
       continue;
     }
 
     // ========== 无工具调用（纯文本响应） ==========
-    config.callbacks?.onStepEnd?.(step);
     if (state.isFinished()) break;
 
     // 否则发送提示消息，要求模型调用工具
@@ -188,4 +171,94 @@ export async function runAgent(task: string, config: AgentConfig): Promise<Final
     summary: state.summary ?? "Agent reached max steps without finishing.",
     trajectoryPath: config.trajectoryLogger?.outputDir,
   };
+}
+
+/**
+ * 执行工具调用列表。
+ * 提取为独立函数以保持 runAgent 的可读性。
+ *
+ * 并行执行策略：
+ * - 当 profile.supportsParallelToolCalls 为 true 且有多个工具调用时，
+ *   使用 Promise.all 并行执行（所有调用先验证再批量执行）
+ * - 否则顺序执行（每个调用验证→修复→执行→存储）
+ *
+ * 注意：并行模式下，finish 工具的检测在所有调用完成后统一处理。
+ */
+async function executeToolCalls(
+  toolCalls: import("../llm/message.js").ToolCall[],
+  step: number,
+  state: AgentState,
+  config: AgentConfig,
+  profile: ModelProfile,
+  llm: LLMClient,
+  registry: ToolRegistry,
+  repairer: ToolCallRepairer,
+  compressor: ObservationCompressor,
+): Promise<void> {
+  // 并行模式：多个工具调用且模型支持并行
+  if (profile.supportsParallelToolCalls && toolCalls.length > 1) {
+    const results = await Promise.all(
+      toolCalls.map((call) => executeOneToolCall(call, step, state, config, profile, llm, registry, repairer, compressor))
+    );
+    // 检查是否有 finish 调用
+    for (let i = 0; i < toolCalls.length; i++) {
+      if (toolCalls[i].name === "finish" && state.isFinished()) break;
+    }
+    return;
+  }
+
+  // 顺序模式：逐个执行
+  for (const call of toolCalls) {
+    await executeOneToolCall(call, step, state, config, profile, llm, registry, repairer, compressor);
+    if (call.name === "finish" && state.isFinished()) {
+      break;
+    }
+  }
+}
+
+/**
+ * 执行单个工具调用：验证 → 修复（如失败）→ 执行 → 压缩结果 → 存储。
+ */
+async function executeOneToolCall(
+  call: import("../llm/message.js").ToolCall,
+  step: number,
+  state: AgentState,
+  config: AgentConfig,
+  profile: ModelProfile,
+  llm: LLMClient,
+  registry: ToolRegistry,
+  repairer: ToolCallRepairer,
+  compressor: ObservationCompressor,
+): Promise<ToolResult> {
+  const validation = registry.validate(call);
+
+  let toolResult: ToolResult;
+  if (!validation.ok) {
+    const repaired = await repairer.repair(call, validation.error!, profile, llm);
+    if (repaired) {
+      config.callbacks?.onToolExecute?.(repaired.name, repaired.arguments);
+      toolResult = await registry.run(repaired, state.toolContext);
+      toolResult = { ...toolResult, content: compressor.compress(repaired.name, toolResult.content) };
+      state.addToolResult(repaired, toolResult);
+      config.trajectoryLogger?.logToolCall(step, repaired, toolResult);
+      config.callbacks?.onToolResult?.(repaired.name, toolResult.content, toolResult.isError);
+    } else {
+      toolResult = {
+        toolCallId: call.id,
+        name: call.name,
+        content: `Tool call validation failed: ${validation.error}. Repair also failed.`,
+        isError: true,
+      };
+      state.addToolResult(call, toolResult);
+    }
+  } else {
+    config.callbacks?.onToolExecute?.(call.name, call.arguments);
+    toolResult = await registry.run(call, state.toolContext);
+    toolResult = { ...toolResult, content: compressor.compress(call.name, toolResult.content) };
+    state.addToolResult(call, toolResult);
+    config.trajectoryLogger?.logToolCall(step, call, toolResult);
+    config.callbacks?.onToolResult?.(call.name, toolResult.content, toolResult.isError);
+  }
+
+  return toolResult;
 }

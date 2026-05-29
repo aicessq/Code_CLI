@@ -12,7 +12,7 @@ const MAX_FILES = 200;
  * 仓库目录树生成器。
  *
  * 生成项目的目录树字符串，用于 system prompt 中让模型了解项目结构。
- * 已构建但尚未集成到 agent loop 中。
+ * 已集成到 agent loop 中，目录树注入到 system prompt 的 Project structure 部分。
  *
  * 特性：
  * - 自动忽略 node_modules、.git 等无关目录

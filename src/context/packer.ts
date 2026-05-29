@@ -18,8 +18,7 @@
  * Token 预算计算:
  *   可用 Token = contextWindow - maxOutputTokens - 2000 (安全余量)
  *
- * 注意: 此模块已实现但尚未集成到 Agent Loop 中。
- * 当前 Agent Loop 直接使用 state.messages，可能导致长任务的上下文溢出。
+ * 此模块已集成到 Agent Loop 中，在每次 LLM 调用前通过 build() 压缩消息列表。
  */
 import type { AgentMessage, AssistantMessage } from "../llm/message.js";
 import type { ModelProfile } from "../llm/model_profile.js";

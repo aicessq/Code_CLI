@@ -119,6 +119,12 @@ export function loadSettings(): Settings {
  * 将 Settings 解析为 ResolvedConfig。
  * 验证 activeProvider 存在且有 API 密钥，查找对应的 ModelProfile，
  * 清理 baseURL 末尾斜杠（OpenAI SDK 会自动追加 /chat/completions）。
+ *
+ * 环境变量回退：
+ * - API_KEY: MIMO_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY 等（provider 名大写 + _API_KEY）
+ * - BASE_URL: MIMO_BASE_URL / OPENAI_BASE_URL 等
+ * - MODEL: MIMO_MODEL / OPENAI_MODEL 等
+ * 环境变量优先级低于 settings 文件，仅在文件中未配置时生效。
  */
 export function resolveConfig(settings: Settings): ResolvedConfig {
   const provider = settings.providers[settings.activeProvider];
@@ -126,18 +132,27 @@ export function resolveConfig(settings: Settings): ResolvedConfig {
     const available = Object.keys(settings.providers).join(", ");
     throw new Error(`Provider "${settings.activeProvider}" not found in settings. Available: ${available}`);
   }
-  if (!provider.apiKey) {
-    throw new Error(`No API key for provider "${settings.activeProvider}". Edit ${join(CONFIG_DIR, SETTINGS_FILE)}`);
+
+  // 环境变量回退：provider 名转大写作为前缀（如 mimo-token-plan → MIMO_TOKEN_PLAN）
+  const envPrefix = settings.activeProvider.toUpperCase().replace(/-/g, "_");
+
+  const apiKey = provider.apiKey || process.env[`${envPrefix}_API_KEY`] || "";
+  const baseURL = (provider.baseURL || process.env[`${envPrefix}_BASE_URL`] || "").replace(/\/+$/, "");
+  const model = provider.model || process.env[`${envPrefix}_MODEL`] || "";
+
+  if (!apiKey) {
+    throw new Error(
+      `No API key for provider "${settings.activeProvider}". ` +
+      `Set it in ${join(CONFIG_DIR, SETTINGS_FILE)} or via ${envPrefix}_API_KEY environment variable.`
+    );
   }
 
-  const profile = profileRegistry.get(provider.model);
-  // baseURL goes directly to OpenAI SDK which appends /chat/completions
-  const baseURL = provider.baseURL.replace(/\/+$/, "");
+  const profile = profileRegistry.get(model);
 
   return {
-    apiKey: provider.apiKey,
+    apiKey,
     baseURL,
-    model: provider.model,
+    model,
     profile,
     sandbox: settings.sandbox,
     maxSteps: settings.maxSteps,
