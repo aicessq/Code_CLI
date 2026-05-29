@@ -37,6 +37,8 @@ import { createFinishTool } from "../tools/finish.js";
 import { ContextPacker } from "../context/packer.js";
 import { ObservationCompressor } from "../context/observation_compressor.js";
 import { RepoMap } from "../context/repo_map.js";
+import type { MemoryLoader } from "../memory/loader.js";
+import { createMemoryTools } from "../tools/memory.js";
 
 export interface AgentCallbacks extends StreamCallbacks {
   onStepStart?: (step: number) => void;
@@ -66,6 +68,8 @@ export interface AgentConfig {
   maxSteps: number;
   /** 工作目录（工具执行的根目录） */
   workingDirectory: string;
+  /** 可选的记忆加载器（跨 session 持久化知识） */
+  memoryLoader?: MemoryLoader;
   /** 可选的回调函数（流式输出、工具执行状态） */
   callbacks?: AgentCallbacks;
 }
@@ -106,10 +110,18 @@ export async function runAgent(task: string, config: AgentConfig): Promise<Final
     state.setFinished(summary);
   }));
 
+  // Register memory tools — 让 agent 能跨 session 持久化知识
+  if (config.memoryLoader) {
+    for (const tool of createMemoryTools(config.memoryLoader)) {
+      registry.register(tool);
+    }
+  }
+
   // ========== 阶段 1: 加载系统 Prompt ==========
   // PromptLoader 从 src/prompts/*.md 加载模板
   // 模板中的 {task_description} 和 {tool_names} 会被替换
   // 注入 RepoMap 让模型了解项目结构
+  // 注入 Memory 让模型了解跨 session 的知识
   const systemPrompt = promptLoader.load(profile.promptProfile);
   let repoTree = "";
   try {
@@ -118,11 +130,15 @@ export async function runAgent(task: string, config: AgentConfig): Promise<Final
     // 仓库目录树生成失败不影响主流程
   }
 
+  // 构建记忆上下文
+  const memoryContext = config.memoryLoader?.buildMemoryContext() ?? "";
+
   state.addSystemMessage(
     systemPrompt
       .replace("{task_description}", task)
       .replace("{tool_names}", registry.list().map((t) => t.schema.name).join(", "))
       + (repoTree ? `\n\nProject structure:\n\`\`\`\n${repoTree}\n\`\`\`` : "")
+      + (memoryContext ? `\n\n${memoryContext}` : "")
   );
 
   // ========== 阶段 2: 主循环 ==========

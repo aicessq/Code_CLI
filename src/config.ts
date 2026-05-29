@@ -34,6 +34,14 @@ export interface Settings {
   logDir: string;
   /** Docker 沙箱使用的镜像名称（仅 sandbox=docker 时生效） */
   dockerImage?: string;
+  /** 全局记忆目录（默认 ~/.mimocoding/memory/，用户级，跨所有项目） */
+  globalMemoryDir?: string;
+  /** 项目记忆目录（默认 <cwd>/.mimocoding/memory/，可提交 git） */
+  projectMemoryDir?: string;
+  /** 本地记忆目录（默认 <cwd>/.mimocoding/memory-local/，不提交版本控制） */
+  localMemoryDir?: string;
+  /** 是否启用记忆功能（默认 true） */
+  memoryEnabled?: boolean;
 }
 
 /**
@@ -51,6 +59,14 @@ export interface ResolvedConfig {
   workingDirectory: string;
   logDir: string;
   dockerImage: string;
+  /** 全局记忆目录（用户级） */
+  globalMemoryDir: string;
+  /** 项目记忆目录（可提交 git） */
+  projectMemoryDir: string;
+  /** 本地记忆目录（不提交版本控制） */
+  localMemoryDir: string;
+  /** 是否启用记忆功能 */
+  memoryEnabled: boolean;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -159,6 +175,10 @@ export function resolveConfig(settings: Settings): ResolvedConfig {
     workingDirectory: process.cwd(),
     logDir: settings.logDir,
     dockerImage: settings.dockerImage ?? "code-agent-sandbox:latest",
+    globalMemoryDir: settings.globalMemoryDir ?? join(CONFIG_DIR, "memory"),
+    projectMemoryDir: settings.projectMemoryDir ?? join(process.cwd(), ".mimocoding", "memory"),
+    localMemoryDir: settings.localMemoryDir ?? join(process.cwd(), ".mimocoding", "memory-local"),
+    memoryEnabled: settings.memoryEnabled ?? true,
   };
 }
 

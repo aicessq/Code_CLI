@@ -1,4 +1,5 @@
 import * as readline from "node:readline";
+import { join } from "node:path";
 import type { Settings, ResolvedConfig } from "./config.js";
 import { resolveConfig, CONFIG_DIR } from "./config.js";
 import { OpenAICompatibleClient } from "./llm/openai_compatible.js";
@@ -14,6 +15,8 @@ import { bashTool } from "./tools/bash.js";
 import { applyPatchTool } from "./tools/apply_patch.js";
 import { gitStatusTool, gitDiffTool } from "./tools/git.js";
 import type { Sandbox } from "./sandbox/base.js";
+import { MemoryLoader } from "./memory/loader.js";
+import { DEFAULT_MEMORY_CONFIG, type MemoryConfig } from "./memory/types.js";
 
 /**
  * REPL 和单次任务执行 UI。
@@ -115,6 +118,7 @@ function showHelp() {
     ${c.cyan}/help${c.reset}            Show this help
     ${c.cyan}/provider${c.reset} <name> Switch active provider
     ${c.cyan}/config${c.reset}          Show current configuration
+    ${c.cyan}/memory${c.reset}          List saved memories
     ${c.cyan}/clear${c.reset}           Clear screen
     ${c.cyan}/quit${c.reset}            Exit
 `);
@@ -219,6 +223,16 @@ export async function executeTask(task: string, settings: Settings): Promise<voi
   const registry = createRegistry();
   const callbacks = buildCallbacks();
 
+  // 初始化记忆系统（三层：global / project / local）
+  const memoryConfig: MemoryConfig = {
+    ...DEFAULT_MEMORY_CONFIG,
+    globalDir: config.globalMemoryDir,
+    projectDir: config.projectMemoryDir,
+    localDir: config.localMemoryDir,
+    enabled: config.memoryEnabled,
+  };
+  const memoryLoader = config.memoryEnabled ? new MemoryLoader(memoryConfig) : undefined;
+
   let sandbox: Sandbox;
   if (config.sandbox === "docker") {
     sandbox = await DockerSandbox.create({
@@ -244,6 +258,7 @@ export async function executeTask(task: string, settings: Settings): Promise<voi
       trajectoryLogger,
       maxSteps: config.maxSteps,
       workingDirectory: config.workingDirectory,
+      memoryLoader,
       callbacks,
     });
 
@@ -315,6 +330,53 @@ export async function startREPL(settings: Settings) {
         case "/config":
           showConfig(settings);
           break;
+        case "/memory": {
+          const memConfig: MemoryConfig = {
+            ...DEFAULT_MEMORY_CONFIG,
+            globalDir: settings.globalMemoryDir ?? join(CONFIG_DIR, "memory"),
+            projectDir: settings.projectMemoryDir ?? join(process.cwd(), ".mimocoding", "memory"),
+            localDir: settings.localMemoryDir ?? join(process.cwd(), ".mimocoding", "memory-local"),
+            enabled: settings.memoryEnabled ?? true,
+          };
+          if (!memConfig.enabled) {
+            console.log(`\n  ${c.yellow}Memory is disabled.${c.reset}\n`);
+            break;
+          }
+          const loader = new MemoryLoader(memConfig);
+          const memories = loader.listMemories();
+          if (memories.length === 0) {
+            console.log(`\n  ${c.dim}No memories saved yet.${c.reset}\n`);
+          } else {
+            const w = 56;
+            console.log(`\n${c.dim}${"─".repeat(w)}${c.reset}`);
+            console.log(`  ${c.bold}Memories${c.reset} ${c.dim}(${memories.length})${c.reset}`);
+            console.log(`${c.dim}${"─".repeat(w)}${c.reset}`);
+
+            // 按 scope 分组展示
+            const byScope: Record<string, typeof memories> = {};
+            for (const m of memories) {
+              if (!byScope[m.scope]) byScope[m.scope] = [];
+              byScope[m.scope].push(m);
+            }
+
+            const SCOPE_LABELS: Record<string, string> = {
+              global: "Global (user preferences)",
+              project: "Project",
+              local: "Local (not committed)",
+            };
+
+            for (const scope of ["global", "project", "local"] as const) {
+              const group = byScope[scope];
+              if (!group || group.length === 0) continue;
+              console.log(`\n  ${c.cyan}${c.bold}${SCOPE_LABELS[scope]}${c.reset}`);
+              for (const m of group) {
+                console.log(`    ${c.white}${m.name}${c.reset} ${c.dim}(${m.type}) -- ${m.description}${c.reset}`);
+              }
+            }
+            console.log(`\n${c.dim}${"─".repeat(w)}${c.reset}\n`);
+          }
+          break;
+        }
         case "/clear":
           console.clear();
           printBanner(settings);
